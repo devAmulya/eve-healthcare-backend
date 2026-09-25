@@ -1,0 +1,118 @@
+import random
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.deps import get_current_user
+from app.models import Booking, BookingStatus, Payment, PaymentStatus, User
+from app.schemas import PaymentInitiate, PaymentOut, WebhookPayload
+
+router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+def _apply_payment_result(booking: Booking, result: PaymentStatus) -> None:
+    booking.status = BookingStatus.CONFIRMED if result == PaymentStatus.SUCCESS else BookingStatus.FAILED
+
+
+@router.post("/", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
+def initiate_payment(
+    payload: PaymentInitiate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Client-triggered "pay now" simulation. This represents the synchronous
+    leg of a payment flow (the user hits pay, we call a provider, we get
+    an immediate result). The async confirmation leg is /payments/webhook/.
+    """
+    booking = db.get(Booking, payload.booking_id)
+    if not booking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+    if booking.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this booking")
+
+    if booking.status != BookingStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Booking is {booking.status.value}, not payable",
+        )
+
+    if booking.payment is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Booking already has a payment on file")
+
+    result = payload.force_result or random.choices(
+        [PaymentStatus.SUCCESS, PaymentStatus.FAILED], weights=[80, 20], k=1
+    )[0]
+
+    payment = Payment(
+        booking_id=booking.id,
+        amount=booking.amount,
+        status=result,
+        provider_event_id=f"sim-{uuid.uuid4()}",
+    )
+    _apply_payment_result(booking, result)
+
+    db.add(payment)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost a race with a concurrent payment/webhook for the same booking.
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Booking already has a payment on file")
+
+    db.refresh(payment)
+    return payment
+
+
+@router.post("/webhook/")
+def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
+    """
+    Simulates a payment provider pushing an async status update.
+
+    Idempotency contract: the same event_id may arrive more than once
+    (at-least-once delivery is the norm for real providers). Re-delivery
+    must be a safe no-op — no duplicate Payment row, no double status
+    transition. This is enforced at the DB layer via a unique constraint
+    on provider_event_id, not just an application-level "have I seen this
+    before" check, so it also holds under concurrent delivery.
+    """
+    booking = db.get(Booking, payload.booking_id)
+    if not booking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+
+    # Already-processed event: same event_id seen before. Idempotent no-op.
+    existing_by_event = db.query(Payment).filter(Payment.provider_event_id == payload.event_id).first()
+    if existing_by_event is not None:
+        return {"status": "already_processed", "booking_status": booking.status.value}
+
+    # A payment already exists for this booking under a *different* event_id
+    # (e.g. a duplicate/late event from the provider for an already-settled
+    # booking). Booking is already in a terminal paid state — ignore.
+    if booking.payment is not None:
+        return {"status": "already_processed", "booking_status": booking.status.value}
+
+    # A cancelled booking should never be resurrected by a late webhook.
+    if booking.status == BookingStatus.CANCELLED:
+        return {"status": "ignored_booking_cancelled", "booking_status": booking.status.value}
+
+    payment = Payment(
+        booking_id=booking.id,
+        amount=booking.amount,
+        status=payload.status,
+        provider_event_id=payload.event_id,
+    )
+    _apply_payment_result(booking, payload.status)
+
+    db.add(payment)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two concurrent deliveries of the same event both reached this point;
+        # exactly one wins the insert, the other backs off cleanly here.
+        db.rollback()
+        return {"status": "already_processed", "booking_status": booking.status.value}
+
+    return {"status": "processed", "booking_status": booking.status.value}
