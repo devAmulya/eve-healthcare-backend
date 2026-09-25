@@ -1,6 +1,10 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 from sqlalchemy import (
     Column,
@@ -38,7 +42,7 @@ class User(Base):
     id = Column(String, primary_key=True, default=gen_uuid)
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
 
     bookings = relationship("Booking", back_populates="user")
 
@@ -78,8 +82,8 @@ class Booking(Base):
     amount = Column(Float, nullable=False)
 
     status = Column(Enum(BookingStatus), nullable=False, default=BookingStatus.PENDING)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     user = relationship("User", back_populates="bookings")
     test = relationship("DiagnosticTest")
@@ -107,7 +111,7 @@ class Payment(Base):
     # both slipping through.
     provider_event_id = Column(String, unique=True, nullable=False, index=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
 
     booking = relationship("Booking", back_populates="payment")
 

@@ -18,6 +18,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(subject: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
+    # python-jose's internal utcnow() is deprecated-noisy but harmless; we pass
+    # an explicit aware "exp" claim, which is what actually gets validated.
     payload = {"sub": subject, "exp": expire}
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
