@@ -1,6 +1,12 @@
 import uuid
 
 
+def test_root_path_redirects_to_docs(client):
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code in (302, 307)
+    assert resp.headers["location"] == "/docs"
+
+
 def test_response_has_request_id_header(client):
     resp = client.get("/health")
     assert resp.status_code == 200

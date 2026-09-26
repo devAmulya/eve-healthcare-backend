@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -31,6 +32,16 @@ app.include_router(auth.router)
 app.include_router(centres.router)
 app.include_router(bookings.router)
 app.include_router(payments.router)
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    """
+    The root path has no API meaning of its own; redirect it to the
+    interactive docs so hitting http://localhost:8000/ directly doesn't
+    return a bare 404.
+    """
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health", tags=["health"])
