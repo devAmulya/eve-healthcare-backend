@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import Booking, BookingStatus, DiagnosticTest, User
-from app.schemas import BookingCreate, BookingOut
+from app.pagination import PaginationParams, pagination_params
+from app.schemas import BookingCreate, BookingOut, Page
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
@@ -41,12 +42,21 @@ def create_booking(
     return booking
 
 
-@router.get("/", response_model=list[BookingOut])
+@router.get("/", response_model=Page[BookingOut])
 def list_my_bookings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    pagination: PaginationParams = Depends(pagination_params),
 ):
-    return db.query(Booking).filter(Booking.user_id == current_user.id).order_by(Booking.created_at.desc()).all()
+    query = db.query(Booking).filter(Booking.user_id == current_user.id)
+    total = query.count()
+    items = (
+        query.order_by(Booking.created_at.desc())
+        .offset(pagination.skip)
+        .limit(pagination.limit)
+        .all()
+    )
+    return Page(items=items, total=total, skip=pagination.skip, limit=pagination.limit)
 
 
 def _get_owned_booking(booking_id: str, db: Session, current_user: User) -> Booking:

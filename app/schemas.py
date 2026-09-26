@@ -1,9 +1,20 @@
 from datetime import datetime
-from typing import Optional
+from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.models import BookingStatus, PaymentStatus
+
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
+    """Generic offset-pagination envelope reused across list endpoints."""
+
+    items: list[T]
+    total: int
+    skip: int
+    limit: int
 
 # ---------- Auth ----------
 

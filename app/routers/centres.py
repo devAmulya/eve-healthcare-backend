@@ -3,14 +3,21 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
 from app.models import DiagnosticCentre
-from app.schemas import DiagnosticCentreOut
+from app.pagination import PaginationParams, pagination_params
+from app.schemas import DiagnosticCentreOut, Page
 
 router = APIRouter(prefix="/centres", tags=["centres"])
 
 
-@router.get("/", response_model=list[DiagnosticCentreOut])
-def list_centres(db: Session = Depends(get_db)):
-    return db.query(DiagnosticCentre).options(joinedload(DiagnosticCentre.tests)).all()
+@router.get("/", response_model=Page[DiagnosticCentreOut])
+def list_centres(
+    db: Session = Depends(get_db),
+    pagination: PaginationParams = Depends(pagination_params),
+):
+    query = db.query(DiagnosticCentre).options(joinedload(DiagnosticCentre.tests))
+    total = query.count()
+    items = query.order_by(DiagnosticCentre.id).offset(pagination.skip).limit(pagination.limit).all()
+    return Page(items=items, total=total, skip=pagination.skip, limit=pagination.limit)
 
 
 @router.get("/{centre_id}", response_model=DiagnosticCentreOut)

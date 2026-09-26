@@ -104,4 +104,6 @@ def test_list_bookings_only_returns_own(client, auth_headers, seeded_test):
 
     resp = client.get("/bookings/", headers=headers_a)
     assert resp.status_code == 200
-    assert len(resp.json()) == 1
+    body = resp.json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
