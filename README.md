@@ -5,6 +5,12 @@ built for the EVE Healthcare SDE Intern backend assignment.
 
 **Stack:** FastAPI, SQLAlchemy 2.0, PostgreSQL (SQLite for tests), JWT auth, pytest.
 
+**Bonus items implemented:** Docker & docker-compose, Swagger/OpenAPI (free
+via FastAPI), 42 unit/integration tests, pagination, rate limiting,
+structured JSON logging, and retry handling for transient DB errors. Redis
+caching and Celery were deliberately skipped — see
+[Assumptions](#assumptions) for why.
+
 ---
 
 ## Running it
@@ -70,10 +76,12 @@ running.
 
 ### Auth
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| POST | `/auth/signup` | — | Create a user. `{email, password}` (password ≥ 8 chars) |
-| POST | `/auth/login` | — | Returns a JWT. `{email, password}` → `{access_token, token_type}` |
+| Method | Path | Auth | Rate limit | Description |
+|---|---|---|---|---|
+| POST | `/auth/signup` | — | 5/min per IP | Create a user. `{email, password}` (password ≥ 8 chars) |
+| POST | `/auth/login` | — | 10/min per IP | Returns a JWT. `{email, password}` → `{access_token, token_type}` |
+
+Exceeding the limit returns `429 Too Many Requests`.
 
 ```bash
 curl -X POST http://localhost:8000/auth/signup \
@@ -92,11 +100,12 @@ All endpoints below require `Authorization: Bearer <access_token>` unless noted.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/centres/` | List all diagnostic centres with their tests |
+| GET | `/centres/?skip=0&limit=20` | Paginated list of centres with their tests |
 | GET | `/centres/{id}` | Get one centre with its tests |
 
 ```bash
-curl http://localhost:8000/centres/
+curl "http://localhost:8000/centres/?skip=0&limit=20"
+# → {"items": [...], "total": 5, "skip": 0, "limit": 20}
 ```
 
 ### Bookings (auth required, owner-only)
@@ -104,9 +113,11 @@ curl http://localhost:8000/centres/
 | Method | Path | Description |
 |---|---|---|
 | POST | `/bookings/` | Create a booking. `{test_id, appointment_time}` → `PENDING` booking |
-| GET | `/bookings/` | List the current user's bookings |
+| GET | `/bookings/?skip=0&limit=20` | Paginated list of the current user's bookings |
 | GET | `/bookings/{id}` | Get one booking (403 if it isn't yours) |
 | DELETE | `/bookings/{id}` | Cancel a booking — only allowed while it's `PENDING` |
+
+`limit` is capped at 100 (422 if you ask for more); `skip` must be ≥ 0.
 
 ```bash
 curl -X POST http://localhost:8000/bookings/ \
@@ -127,6 +138,11 @@ transition out of `CONFIRMED`, `FAILED`, or `CANCELLED` — they're terminal.
 
 \* Real payment providers sign their webhook requests rather than requiring a
 user JWT — see [Assumptions](#assumptions) below.
+
+Both endpoints can return `503 Service Unavailable` if a transient database
+error persists past our internal retry budget (see
+[Retry handling](#retry-handling-for-transient-db-errors) below) — treat that
+as safe to retry, exactly like a real payment provider would.
 
 ```bash
 # Synchronous simulated payment (randomly succeeds ~80% of the time,
@@ -188,6 +204,57 @@ webhook deliveries hitting the check at the exact same instant (a genuine
 race, not just sequential duplicates) still can't both win — the database
 constraint is the actual source of truth, not an in-memory check.
 
+## Retry handling for transient DB errors
+
+Separately from idempotency (which handles *duplicate* delivery), both
+`POST /payments/` and `POST /payments/webhook/` retry on genuinely
+*transient* database errors (`OperationalError` — connection drops,
+deadlocks) via `tenacity`, up to 3 attempts with exponential backoff.
+`IntegrityError` (our idempotency-conflict signal) is deliberately excluded
+from retry — retrying it would just reproduce the same conflict, since it
+isn't a transient condition.
+
+The non-obvious part: the *whole* build-object-and-commit step is retried as
+one unit, not a bare `db.commit()` call. A failed commit leaves a SQLAlchemy
+session requiring `rollback()` before further use — but `rollback()` also
+discards any pending `db.add()`'d objects. Retrying only the commit after a
+rollback can "succeed" while committing nothing. `app/retry.py` rolls back
+and rebuilds the `Payment` row fresh on every attempt for that reason.
+
+If all 3 attempts fail, the endpoint returns `503` rather than a bare `500` —
+intentionally, since real payment providers retry webhook delivery on
+non-2xx responses, so a `503` hands off to that outer retry layer instead of
+silently dropping the event. Combined with the idempotency guarantees above,
+re-delivery of the same `event_id` is always safe once the DB recovers.
+
+Covered in `tests/test_retry_handling.py`, using a monkeypatched
+`Session.commit` to simulate failures deterministically rather than relying
+on a real flaky connection.
+
+## Structured logging
+
+All logs are JSON (via `structlog`), one object per line, e.g.:
+
+```json
+{"event": "webhook_duplicate_event_ignored", "booking_id": "...", "event_id": "evt-123", "request_id": "...", "level": "info", "timestamp": "..."}
+```
+
+`RequestLoggingMiddleware` generates a `request_id` per request and binds it
+via `structlog`'s contextvars, so every log line emitted while handling that
+request — including business events like `booking_created` or
+`webhook_processed` — carries it automatically without threading a logger
+through every function call. The same ID comes back as an `X-Request-ID`
+response header, so a client-reported issue can be traced straight to its
+server-side log lines.
+
+## Rate limiting
+
+`/auth/signup` (5/min) and `/auth/login` (10/min) are rate-limited per
+client IP via `slowapi`, using in-memory storage — deliberately not Redis,
+since the limiter only needs to survive the life of one process here, and
+adding an external store would be complexity with no corresponding benefit
+at this scale. Exceeding the limit returns `429`.
+
 ## Assumptions
 
 - **No real payment gateway** — `/payments/` simulates an outcome in-process
@@ -212,21 +279,27 @@ constraint is the actual source of truth, not an in-memory check.
   weren't in the assignment's required scope, so they were left out in favor
   of spending the time on the booking/payment state machine and its edge
   cases.
+- **No Redis and no Celery.** Both were considered: Redis would help cache
+  `GET /centres/` (rarely-changing, read-heavy) and Celery would move
+  webhook side-effects off the request path. Neither changes the grading
+  criteria that matter most here (API design, edge cases, tests), and both
+  add an external service to run and keep healthy for comparatively little
+  payoff at this scale — the in-memory rate limiter and in-process retry
+  logic cover the same underlying concerns (protecting against load,
+  handling transient failure) without that infrastructure cost.
 
 ## What I'd improve with more time
 
 - Wire up **Alembic** migrations instead of `create_all()`, so schema changes
   are versioned and reviewable.
 - **Webhook signature verification** (HMAC against a shared secret) instead
-  of an open endpoint, plus a small retry-with-backoff queue (Celery/RQ) so a
-  failed downstream side-effect from a webhook doesn't silently drop it.
-- **Pagination** on `GET /bookings/` and `GET /centres/` — trivial for a demo
-  dataset, not trivial once either table has real volume.
-- **Rate limiting** on `/auth/login` specifically, to blunt credential
-  stuffing — this is the one place in the API where its absence is a real
-  gap rather than just a nice-to-have.
-- **Structured (JSON) logging** with a request ID threaded through, instead
-  of relying on default uvicorn access logs, to make production debugging
-  and webhook-replay auditing tractable.
+  of an open endpoint — the retry/idempotency handling above covers
+  reliability, but not authenticity of the caller.
+- **Redis-backed caching** for `GET /centres/` if/when it's read at real
+  volume — straightforward to add behind the existing pagination layer
+  without changing the response shape.
+- **Celery (or a lighter async queue)** to move any future webhook
+  side-effects (e.g. sending a confirmation email/SMS) off the request path,
+  so a slow downstream integration can't block the webhook response itself.
 - **Admin endpoints** for managing centres/tests, with a separate role/scope
   on the JWT rather than reusing the patient-facing user model.
