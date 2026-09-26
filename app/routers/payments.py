@@ -2,13 +2,14 @@ import random
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user
 from app.logging_config import get_logger
 from app.models import Booking, BookingStatus, Payment, PaymentStatus, User
+from app.retry import retry_on_transient_db_error
 from app.schemas import PaymentInitiate, PaymentOut, WebhookPayload
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -17,6 +18,22 @@ logger = get_logger(__name__)
 
 def _apply_payment_result(booking: Booking, result: PaymentStatus) -> None:
     booking.status = BookingStatus.CONFIRMED if result == PaymentStatus.SUCCESS else BookingStatus.FAILED
+
+
+@retry_on_transient_db_error
+def _settle_payment(db: Session, booking: Booking, result: PaymentStatus, event_id: str) -> Payment:
+    """
+    Builds the Payment row, applies the booking transition, and commits -
+    all in one retryable unit. See app/retry.py for why this can't just be
+    a bare db.commit() retry: a rollback() between attempts would discard
+    these db.add()'d objects, so each retry rebuilds them fresh.
+    """
+    payment = Payment(booking_id=booking.id, amount=booking.amount, status=result, provider_event_id=event_id)
+    _apply_payment_result(booking, result)
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+    return payment
 
 
 @router.post("/", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
@@ -48,24 +65,21 @@ def initiate_payment(
     result = payload.force_result or random.choices(
         [PaymentStatus.SUCCESS, PaymentStatus.FAILED], weights=[80, 20], k=1
     )[0]
+    event_id = f"sim-{uuid.uuid4()}"
 
-    payment = Payment(
-        booking_id=booking.id,
-        amount=booking.amount,
-        status=result,
-        provider_event_id=f"sim-{uuid.uuid4()}",
-    )
-    _apply_payment_result(booking, result)
-
-    db.add(payment)
     try:
-        db.commit()
+        payment = _settle_payment(db, booking, result, event_id)
     except IntegrityError:
         # Lost a race with a concurrent payment/webhook for the same booking.
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Booking already has a payment on file")
+    except OperationalError:
+        # Retries exhausted on a genuinely transient DB error. Surface a 503
+        # rather than a bare 500 so a client/caller knows it's safe to retry.
+        db.rollback()
+        logger.error("payment_initiation_failed_transient_db_error", booking_id=booking.id)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Temporarily unavailable, please retry")
 
-    db.refresh(payment)
     logger.info(
         "payment_initiated",
         booking_id=booking.id,
@@ -123,17 +137,8 @@ def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
         )
         return {"status": "ignored_booking_cancelled", "booking_status": booking.status.value}
 
-    payment = Payment(
-        booking_id=booking.id,
-        amount=booking.amount,
-        status=payload.status,
-        provider_event_id=payload.event_id,
-    )
-    _apply_payment_result(booking, payload.status)
-
-    db.add(payment)
     try:
-        db.commit()
+        payment = _settle_payment(db, booking, payload.status, payload.event_id)
     except IntegrityError:
         # Two concurrent deliveries of the same event both reached this point;
         # exactly one wins the insert, the other backs off cleanly here.
@@ -144,6 +149,23 @@ def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
             event_id=payload.event_id,
         )
         return {"status": "already_processed", "booking_status": booking.status.value}
+    except OperationalError:
+        # Retries exhausted on a genuinely transient DB error (not an
+        # idempotency conflict). Return 5xx on purpose: real payment
+        # providers retry webhook delivery on non-2xx responses, so this
+        # hands off to that outer retry layer instead of silently losing
+        # the event. Combined with our idempotency guarantees, a re-delivery
+        # of the same event_id is always safe once the DB recovers.
+        db.rollback()
+        logger.error(
+            "webhook_processing_failed_transient_db_error",
+            booking_id=booking.id,
+            event_id=payload.event_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Temporarily unable to process webhook, please retry delivery",
+        )
 
     logger.info(
         "webhook_processed",
