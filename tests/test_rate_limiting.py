@@ -19,6 +19,6 @@ def test_login_blocks_after_limit_exceeded(client):
         client.post("/auth/login", json={"email": "bruteforce@example.com", "password": "wrongpassword"})
 
     # The 11th attempt should be rate-limited regardless of whether the
-    # credentials are even correct this time — that's the point.
+    # credentials are even correct this time. That's the point.
     resp = client.post("/auth/login", json={"email": "bruteforce@example.com", "password": "password123"})
     assert resp.status_code == 429

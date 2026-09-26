@@ -11,13 +11,13 @@ from app.routers import auth, bookings, centres, payments
 
 configure_logging()
 
-# In a larger project this would be Alembic migrations. For this assignment's
+# In a larger project this would be Alembic migrations. For this project's
 # scope, create_all on startup is documented in the README as a deliberate
 # simplification.
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
-    title="EVE Healthcare — Diagnostic Bookings API",
+    title="EVE Healthcare - Diagnostic Bookings API",
     description="Backend service for diagnostic test bookings and simulated payments.",
     version="1.0.0",
 )

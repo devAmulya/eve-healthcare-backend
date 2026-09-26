@@ -74,8 +74,8 @@ def initiate_payment(
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Booking already has a payment on file")
     except OperationalError:
-        # Retries exhausted on a genuinely transient DB error. Surface a 503
-        # rather than a bare 500 so a client/caller knows it's safe to retry.
+        # Retries exhausted on a transient DB error. Surface a 503 rather
+        # than a bare 500 so a client/caller knows it's safe to retry.
         db.rollback()
         logger.error("payment_initiation_failed_transient_db_error", booking_id=booking.id)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Temporarily unavailable, please retry")
@@ -97,7 +97,7 @@ def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
 
     Idempotency contract: the same event_id may arrive more than once
     (at-least-once delivery is the norm for real providers). Re-delivery
-    must be a safe no-op — no duplicate Payment row, no double status
+    must be a safe no-op: no duplicate Payment row, no double status
     transition. This is enforced at the DB layer via a unique constraint
     on provider_event_id, not just an application-level "have I seen this
     before" check, so it also holds under concurrent delivery.
@@ -118,7 +118,7 @@ def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
 
     # A payment already exists for this booking under a *different* event_id
     # (e.g. a duplicate/late event from the provider for an already-settled
-    # booking). Booking is already in a terminal paid state — ignore.
+    # booking). Booking is already in a terminal paid state, so ignore.
     if booking.payment is not None:
         logger.info(
             "webhook_duplicate_settlement_ignored",
@@ -150,12 +150,12 @@ def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
         )
         return {"status": "already_processed", "booking_status": booking.status.value}
     except OperationalError:
-        # Retries exhausted on a genuinely transient DB error (not an
-        # idempotency conflict). Return 5xx on purpose: real payment
-        # providers retry webhook delivery on non-2xx responses, so this
-        # hands off to that outer retry layer instead of silently losing
-        # the event. Combined with our idempotency guarantees, a re-delivery
-        # of the same event_id is always safe once the DB recovers.
+        # Retries exhausted on a transient DB error (not an idempotency
+        # conflict). Return 5xx on purpose: real payment providers retry
+        # webhook delivery on non-2xx responses, so this hands off to that
+        # outer retry layer instead of silently losing the event. Combined
+        # with the idempotency guarantees above, a re-delivery of the same
+        # event_id is always safe once the DB recovers.
         db.rollback()
         logger.error(
             "webhook_processing_failed_transient_db_error",

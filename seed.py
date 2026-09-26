@@ -14,7 +14,7 @@ Base.metadata.create_all(bind=engine)
 
 CENTRES = [
     {
-        "name": "Apollo Diagnostics — Karol Bagh",
+        "name": "Apollo Diagnostics, Karol Bagh",
         "location": "Karol Bagh, Delhi",
         "tests": [
             ("Complete Blood Count (CBC)", 299.0),
@@ -23,7 +23,7 @@ CENTRES = [
         ],
     },
     {
-        "name": "MedLife Labs — Saket",
+        "name": "MedLife Labs, Saket",
         "location": "Saket, Delhi",
         "tests": [
             ("HbA1c (Diabetes)", 449.0),

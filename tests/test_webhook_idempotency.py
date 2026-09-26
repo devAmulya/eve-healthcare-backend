@@ -24,9 +24,8 @@ def test_webhook_confirms_pending_booking(client, auth_headers, seeded_test):
 
 def test_duplicate_webhook_event_is_idempotent(client, auth_headers, seeded_test, db_session):
     """
-    This is the core requirement from the assignment: the same event_id
-    delivered twice must not create a second Payment row or re-run the
-    booking status transition.
+    The same event_id delivered twice must not create a second Payment row
+    or re-run the booking status transition.
     """
     headers = auth_headers()
     booking_id = _create_booking(client, headers, seeded_test.id)

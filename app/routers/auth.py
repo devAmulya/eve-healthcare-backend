@@ -33,10 +33,9 @@ def signup(request: Request, payload: UserSignup, db: Session = Depends(get_db))
 def login(request: Request, payload: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
-        # Deliberately identical error for "no such user" and "wrong password"
-        # so login can't be used to enumerate registered emails. The log line
-        # can be more specific than the API response — that distinction is
-        # itself the point of logging separately from the response body.
+        # Identical error for "no such user" and "wrong password" so login
+        # cannot be used to enumerate registered emails. The log line records
+        # which case it actually was; the API response does not.
         logger.warning("login_failed", email=payload.email)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 

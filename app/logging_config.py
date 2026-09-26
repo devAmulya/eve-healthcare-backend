@@ -13,7 +13,7 @@ def configure_logging() -> None:
 
     contextvars.merge_contextvars pulls in whatever request_id (and anything
     else) was bound via structlog.contextvars.bind_contextvars() earlier in
-    the request — see RequestLoggingMiddleware — so every log line emitted
+    the request (see RequestLoggingMiddleware), so every log line emitted
     while handling a request is automatically tagged with it, without
     threading a logger instance through every function call.
     """

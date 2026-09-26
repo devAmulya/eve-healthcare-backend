@@ -29,17 +29,17 @@ def _rollback_and_log(retry_state):
     )
 
 
-# Retries only OperationalError - connection drops, deadlocks, statement
-# timeouts. These are genuinely transient conditions worth waiting out.
-# IntegrityError (our idempotency-conflict signal) is deliberately excluded:
+# Retries only OperationalError: connection drops, deadlocks, statement
+# timeouts. These are transient conditions worth waiting out.
+# IntegrityError (our idempotency-conflict signal) is excluded on purpose:
 # retrying it would just raise the identical conflict again, since "this
 # event/booking was already processed" isn't a transient condition.
 #
-# Important: the *whole* decorated function gets retried, not just a bare
-# db.commit() call. rollback() between attempts discards any pending
-# db.add()'d objects, so retrying only the commit after a rollback would
-# silently commit nothing. Every function wrapped with this decorator
-# rebuilds its objects from scratch on each attempt for that reason.
+# The whole decorated function gets retried, not just a bare db.commit()
+# call. rollback() between attempts discards any pending db.add()'d
+# objects, so retrying only the commit after a rollback would silently
+# commit nothing. Every function wrapped with this decorator rebuilds its
+# objects from scratch on each attempt for that reason.
 retry_on_transient_db_error = retry(
     retry=retry_if_exception_type(OperationalError),
     stop=stop_after_attempt(3),
