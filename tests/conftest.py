@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base, get_db
 from app.main import app
 from app.models import DiagnosticCentre, DiagnosticTest
+from app.rate_limit import limiter
 
 TEST_DB_URL = "sqlite:///./test.db"
 engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -21,6 +22,17 @@ def _fresh_db():
     """Recreate all tables before every test so tests don't leak state into each other."""
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """
+    Without this, every test's auth_headers() call (signup + login) would
+    share one in-memory bucket for the whole pytest run, and unrelated
+    tests would start failing with 429s once ~5 tests had run.
+    """
+    limiter.reset()
     yield
 
 
