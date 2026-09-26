@@ -4,8 +4,12 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.database import Base, engine
+from app.logging_config import configure_logging
+from app.middleware import RequestLoggingMiddleware
 from app.rate_limit import limiter
 from app.routers import auth, bookings, centres, payments
+
+configure_logging()
 
 # In a larger project this would be Alembic migrations. For this assignment's
 # scope, create_all on startup is documented in the README as a deliberate
@@ -21,6 +25,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(auth.router)
 app.include_router(centres.router)

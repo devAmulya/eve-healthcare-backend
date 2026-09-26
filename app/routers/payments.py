@@ -7,10 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user
+from app.logging_config import get_logger
 from app.models import Booking, BookingStatus, Payment, PaymentStatus, User
 from app.schemas import PaymentInitiate, PaymentOut, WebhookPayload
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+logger = get_logger(__name__)
 
 
 def _apply_payment_result(booking: Booking, result: PaymentStatus) -> None:
@@ -64,6 +66,13 @@ def initiate_payment(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Booking already has a payment on file")
 
     db.refresh(payment)
+    logger.info(
+        "payment_initiated",
+        booking_id=booking.id,
+        payment_id=payment.id,
+        result=result.value,
+        provider_event_id=payment.provider_event_id,
+    )
     return payment
 
 
@@ -86,16 +95,32 @@ def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
     # Already-processed event: same event_id seen before. Idempotent no-op.
     existing_by_event = db.query(Payment).filter(Payment.provider_event_id == payload.event_id).first()
     if existing_by_event is not None:
+        logger.info(
+            "webhook_duplicate_event_ignored",
+            booking_id=booking.id,
+            event_id=payload.event_id,
+        )
         return {"status": "already_processed", "booking_status": booking.status.value}
 
     # A payment already exists for this booking under a *different* event_id
     # (e.g. a duplicate/late event from the provider for an already-settled
     # booking). Booking is already in a terminal paid state — ignore.
     if booking.payment is not None:
+        logger.info(
+            "webhook_duplicate_settlement_ignored",
+            booking_id=booking.id,
+            event_id=payload.event_id,
+            existing_payment_id=booking.payment.id,
+        )
         return {"status": "already_processed", "booking_status": booking.status.value}
 
     # A cancelled booking should never be resurrected by a late webhook.
     if booking.status == BookingStatus.CANCELLED:
+        logger.warning(
+            "webhook_ignored_booking_cancelled",
+            booking_id=booking.id,
+            event_id=payload.event_id,
+        )
         return {"status": "ignored_booking_cancelled", "booking_status": booking.status.value}
 
     payment = Payment(
@@ -113,6 +138,18 @@ def payment_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
         # Two concurrent deliveries of the same event both reached this point;
         # exactly one wins the insert, the other backs off cleanly here.
         db.rollback()
+        logger.info(
+            "webhook_lost_race_already_processed",
+            booking_id=booking.id,
+            event_id=payload.event_id,
+        )
         return {"status": "already_processed", "booking_status": booking.status.value}
 
+    logger.info(
+        "webhook_processed",
+        booking_id=booking.id,
+        payment_id=payment.id,
+        event_id=payload.event_id,
+        result=payload.status.value,
+    )
     return {"status": "processed", "booking_status": booking.status.value}

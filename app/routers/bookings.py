@@ -5,11 +5,13 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user
+from app.logging_config import get_logger
 from app.models import Booking, BookingStatus, DiagnosticTest, User
 from app.pagination import PaginationParams, pagination_params
 from app.schemas import BookingCreate, BookingOut, Page
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
+logger = get_logger(__name__)
 
 
 @router.post("/", response_model=BookingOut, status_code=status.HTTP_201_CREATED)
@@ -39,6 +41,13 @@ def create_booking(
     db.add(booking)
     db.commit()
     db.refresh(booking)
+    logger.info(
+        "booking_created",
+        booking_id=booking.id,
+        user_id=current_user.id,
+        test_id=test.id,
+        amount=booking.amount,
+    )
     return booking
 
 
@@ -95,4 +104,5 @@ def cancel_booking(
     booking.status = BookingStatus.CANCELLED
     db.commit()
     db.refresh(booking)
+    logger.info("booking_cancelled", booking_id=booking.id, user_id=current_user.id)
     return booking
